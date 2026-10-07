@@ -1,162 +1,156 @@
-"""Fast pairwise / correlation-based copula fits for competition runtime."""
+"""Full d-dimensional Gaussian, Student-t and Clayton copulas.
+
+All three log-likelihoods are exact joint copula densities on the same
+pseudo-observations, so their AIC values are directly comparable.
+"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
-import pandas as pd
 from scipy import stats
+from scipy.optimize import minimize_scalar
+from scipy.special import gammaln
+
+EPS = 1e-10
 
 
 @dataclass
 class CopulaResult:
     family: str
-    aic: float
-    params: dict
     loglik: float
+    k: int
     lambda_l: float
     lambda_u: float
-    model: object | None = None
+    params: dict = field(default_factory=dict)
+
+    @property
+    def aic(self) -> float:
+        return -2.0 * self.loglik + 2.0 * self.k
 
 
-def _aic(ll: float, k: int) -> float:
-    return -2.0 * ll + 2.0 * k
+def _clip(u: np.ndarray) -> np.ndarray:
+    return np.clip(np.asarray(u, dtype=np.float64), EPS, 1.0 - EPS)
 
 
-def _avg_pairwise_rho(corr: np.ndarray) -> float:
+def nearest_corr(r: np.ndarray, floor: float = 1e-6) -> np.ndarray:
+    """Project a symmetric matrix onto the positive-definite correlations (eigenvalue clipping)."""
+    r = 0.5 * (r + r.T)
+    w, v = np.linalg.eigh(r)
+    r = (v * np.clip(w, floor, None)) @ v.T
+    d = np.sqrt(np.diag(r))
+    r = r / np.outer(d, d)
+    np.fill_diagonal(r, 1.0)
+    return r
+
+
+def kendall_matrix(u: np.ndarray) -> np.ndarray:
+    d = u.shape[1]
+    tau = np.eye(d)
+    for i in range(d):
+        for j in range(i + 1, d):
+            t, _ = stats.kendalltau(u[:, i], u[:, j])
+            tau[i, j] = tau[j, i] = 0.0 if not np.isfinite(t) else t
+    return tau
+
+
+def _offdiag_mean(m: np.ndarray) -> float:
+    return float(m[~np.eye(m.shape[0], dtype=bool)].mean())
+
+
+# ---------------------------------------------------------------- log-densities
+
+def gaussian_logpdf(u: np.ndarray, corr: np.ndarray) -> np.ndarray:
+    z = stats.norm.ppf(_clip(u))
+    inv = np.linalg.inv(corr)
+    _, logdet = np.linalg.slogdet(corr)
+    q = np.einsum("ij,jk,ik->i", z, inv - np.eye(corr.shape[0]), z)
+    return -0.5 * logdet - 0.5 * q
+
+
+def student_logpdf(u: np.ndarray, corr: np.ndarray, nu: float) -> np.ndarray:
     d = corr.shape[0]
-    mask = ~np.eye(d, dtype=bool)
-    vals = corr[mask]
-    return float(np.nanmean(vals))
+    x = stats.t.ppf(_clip(u), df=nu)
+    inv = np.linalg.inv(corr)
+    _, logdet = np.linalg.slogdet(corr)
+    q = np.einsum("ij,jk,ik->i", x, inv, x)
+    const = gammaln((nu + d) / 2.0) + (d - 1) * gammaln(nu / 2.0) - d * gammaln((nu + 1.0) / 2.0) - 0.5 * logdet
+    return const - (nu + d) / 2.0 * np.log1p(q / nu) + (nu + 1.0) / 2.0 * np.log1p(x**2 / nu).sum(axis=1)
 
 
-def student_tail_dep(rho: float, nu: float) -> float:
-    if nu <= 0 or abs(rho) >= 1:
-        return 0.0
-    x = -np.sqrt((nu + 1.0) * (1.0 - rho) / (1.0 + rho))
-    return float(2.0 * stats.t.cdf(x, df=nu + 1.0))
+def clayton_logpdf(u: np.ndarray, theta: float) -> np.ndarray:
+    u = _clip(u)
+    d = u.shape[1]
+    s = np.power(u, -theta).sum(axis=1) - d + 1.0
+    const = np.log1p(theta * np.arange(d)).sum()
+    return const - (1.0 + theta) * np.log(u).sum(axis=1) - (d + 1.0 / theta) * np.log(s)
 
 
-def clayton_lambda_l(theta: float) -> float:
-    if theta <= 0:
-        return 0.0
-    return float(2.0 ** (-1.0 / theta))
-
+# ---------------------------------------------------------------- fitting
 
 def fit_gaussian(u: np.ndarray) -> CopulaResult:
+    u = _clip(u)
     d = u.shape[1]
-    z = stats.norm.ppf(np.clip(u, 1e-6, 1 - 1e-6))
-    corr = np.corrcoef(z, rowvar=False)
-    corr = np.nan_to_num(corr, nan=0.0)
-    # nearest PD
-    eigvals, eigvecs = np.linalg.eigh(corr)
-    eigvals = np.clip(eigvals, 1e-6, None)
-    corr = (eigvecs * eigvals) @ eigvecs.T
-    # renormalize diagonal
-    dstd = np.sqrt(np.diag(corr))
-    corr = corr / np.outer(dstd, dstd)
-    np.fill_diagonal(corr, 1.0)
-    try:
-        ll = float(np.sum(stats.multivariate_normal.logpdf(z, mean=np.zeros(d), cov=corr, allow_singular=True)))
-        # subtract univariate norm logdensities to approximate copula loglik
-        ll -= float(np.sum(stats.norm.logpdf(z)))
-    except Exception:
-        ll = -1e6
-    rho = _avg_pairwise_rho(corr)
-    k = d * (d - 1) // 2
-    return CopulaResult("gaussian", _aic(ll, k), {"rho_avg": rho, "corr": corr}, ll, 0.0, 0.0, None)
+    corr = nearest_corr(np.corrcoef(stats.norm.ppf(u), rowvar=False))
+    ll = float(gaussian_logpdf(u, corr).sum())
+    return CopulaResult("gaussian", ll, d * (d - 1) // 2, 0.0, 0.0, {"corr": corr, "rho_avg": _offdiag_mean(corr)})
 
 
-def fit_student(u: np.ndarray) -> CopulaResult:
+def student_pair_lambda(rho: np.ndarray, nu: float) -> np.ndarray:
+    return 2.0 * stats.t.cdf(-np.sqrt((nu + 1.0) * (1.0 - rho) / (1.0 + rho)), df=nu + 1.0)
+
+
+def fit_student(u: np.ndarray, tau: np.ndarray | None = None) -> CopulaResult:
+    u = _clip(u)
     d = u.shape[1]
-    g = fit_gaussian(u)
-    corr = g.params["corr"]
-    rho = g.params["rho_avg"]
-    # grid search nu on pairwise composite likelihood (fast)
-    best_nu, best_ll = 8.0, -1e18
-    for nu in (3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 12.0, 16.0, 20.0, 30.0):
-        ll = 0.0
-        t = stats.t.ppf(np.clip(u, 1e-6, 1 - 1e-6), df=nu)
-        # meta-elliptical approx: mv-t loglik minus margins
-        try:
-            scale = corr * (nu / (nu - 2.0)) if nu > 2 else corr
-            # use gaussian of t-scores as proxy for speed
-            ll = float(np.sum(stats.multivariate_normal.logpdf(t, mean=np.zeros(d), cov=corr, allow_singular=True)))
-            ll -= float(np.sum(stats.t.logpdf(t, df=nu)))
-        except Exception:
-            continue
-        if ll > best_ll:
-            best_ll, best_nu = ll, nu
-    lam = student_tail_dep(rho, best_nu)
-    k = d * (d - 1) // 2 + 1
+    tau = kendall_matrix(u) if tau is None else tau
+    corr = nearest_corr(np.sin(np.pi * tau / 2.0))
+    opt = minimize_scalar(lambda nu: -student_logpdf(u, corr, nu).sum(), bounds=(2.5, 60.0), method="bounded")
+    nu = float(opt.x)
+    lam = student_pair_lambda(corr[~np.eye(d, dtype=bool)], nu).mean()
     return CopulaResult(
-        "student",
-        _aic(best_ll, k),
-        {"rho_avg": rho, "nu": best_nu, "corr": corr},
-        best_ll,
-        lam,
-        lam,
-        None,
+        "student", -float(opt.fun), d * (d - 1) // 2 + 1, float(lam), float(lam),
+        {"corr": corr, "nu": nu, "rho_avg": _offdiag_mean(corr)},
     )
 
 
 def fit_clayton(u: np.ndarray) -> CopulaResult:
-    d = u.shape[1]
-    thetas = []
-    ll = 0.0
-    for i in range(d):
-        for j in range(i + 1, d):
-            tau, _ = stats.kendalltau(u[:, i], u[:, j])
-            tau = float(tau) if np.isfinite(tau) else 0.0
-            tau = min(max(tau, 1e-4), 0.95)
-            theta = 2.0 * tau / (1.0 - tau)
-            thetas.append(theta)
-            a = np.clip(u[:, i], 1e-6, 1 - 1e-6)
-            b = np.clip(u[:, j], 1e-6, 1 - 1e-6)
-            th = theta
-            term = (
-                np.log(1 + th)
-                - (1 + th) * (np.log(a) + np.log(b))
-                - (2.0 + 1.0 / th) * np.log(np.maximum(a ** (-th) + b ** (-th) - 1.0, 1e-12))
-            )
-            ll += float(np.sum(term))
-    theta = float(np.mean(thetas)) if thetas else 0.5
-    return CopulaResult("clayton", _aic(ll, 1), {"theta": theta}, ll, clayton_lambda_l(theta), 0.0, None)
+    u = _clip(u)
+    opt = minimize_scalar(lambda th: -clayton_logpdf(u, th).sum(), bounds=(1e-3, 20.0), method="bounded")
+    theta = float(opt.x)
+    return CopulaResult(
+        "clayton", -float(opt.fun), 1, float(2.0 ** (-1.0 / theta)), 0.0, {"theta": theta, "dim": u.shape[1]}
+    )
 
 
-def select_copula(u_df: pd.DataFrame) -> CopulaResult:
-    u = np.asarray(u_df, dtype=np.float64)
-    cands = [fit_gaussian(u), fit_student(u), fit_clayton(u)]
-    return min(cands, key=lambda c: c.aic if np.isfinite(c.aic) else 1e18)
+FITTERS = {"gaussian": fit_gaussian, "student": fit_student, "clayton": fit_clayton}
 
 
-def fit_all_families(u_df: pd.DataFrame) -> list[CopulaResult]:
-    u = np.asarray(u_df, dtype=np.float64)
-    return [fit_gaussian(u), fit_student(u), fit_clayton(u)]
+def fit_family(u: np.ndarray, family: str) -> CopulaResult:
+    return FITTERS[family](np.asarray(u, dtype=np.float64))
 
 
-def simulate_uniforms(result: CopulaResult, n: int, dim: int, rng: np.random.Generator) -> np.ndarray:
-    if result.family == "gaussian":
-        corr = result.params.get("corr")
-        if corr is None:
-            rho = float(result.params.get("rho_avg", 0.3))
-            corr = np.full((dim, dim), rho)
-            np.fill_diagonal(corr, 1.0)
-        z = rng.multivariate_normal(np.zeros(dim), corr, size=n)
-        return stats.norm.cdf(z)
-    if result.family == "student":
-        nu = float(result.params.get("nu", 8.0))
-        corr = result.params.get("corr")
-        if corr is None:
-            rho = float(result.params.get("rho_avg", 0.3))
-            corr = np.full((dim, dim), rho)
-            np.fill_diagonal(corr, 1.0)
-        g = rng.multivariate_normal(np.zeros(dim), corr, size=n)
-        chi = rng.chisquare(nu, size=n)[:, None]
-        t = g * np.sqrt(nu / chi)
-        return stats.t.cdf(t, df=nu)
-    theta = max(float(result.params.get("theta", 0.5)), 1e-3)
-    v = rng.gamma(1.0 / theta, 1.0, size=n)
-    e = rng.exponential(1.0, size=(n, dim))
-    return np.power(1.0 + e / v[:, None], -1.0 / theta)
+def fit_all_families(u: np.ndarray) -> list[CopulaResult]:
+    return [fit_family(u, f) for f in FITTERS]
+
+
+def select_copula(u: np.ndarray) -> CopulaResult:
+    return min(fit_all_families(u), key=lambda c: c.aic)
+
+
+# ---------------------------------------------------------------- simulation
+
+def simulate_uniforms(res: CopulaResult, n: int, rng: np.random.Generator) -> np.ndarray:
+    if res.family == "clayton":
+        theta, d = res.params["theta"], res.params["dim"]
+        v = rng.gamma(1.0 / theta, 1.0, size=n)
+        e = rng.exponential(1.0, size=(n, d))
+        return _clip(np.power(1.0 + e / v[:, None], -1.0 / theta))
+    corr = res.params["corr"]
+    g = rng.standard_normal((n, corr.shape[0])) @ np.linalg.cholesky(corr).T
+    if res.family == "gaussian":
+        return _clip(stats.norm.cdf(g))
+    nu = res.params["nu"]
+    w = np.sqrt(nu / rng.chisquare(nu, size=n))[:, None]
+    return _clip(stats.t.cdf(g * w, df=nu))

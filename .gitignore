@@ -9,3 +9,6 @@ __pycache__/
 *.log
 vendor/
 data/etf_prices_*.csv
+submission/
+.tmp_pages/
+.zipcheck/

@@ -1,19 +1,25 @@
-"""MODWT on standardized residuals → H1/H2/H3 band matrices."""
+"""MODWT-MRA horizon bands of standardized residuals, boundary-trimmed."""
 
 from __future__ import annotations
 
 import pandas as pd
 
 from src.config import J_LEVELS, WAVELET
-from src.modwt import modwt, mra_bands
+from src.modwt import band_trim, modwt_mra, mra_bands
 
 
-def decompose_residuals(z: pd.DataFrame) -> dict[str, pd.DataFrame]:
-    """Return aligned H-band DataFrames with same columns/index as z."""
-    bands: dict[str, dict[str, pd.Series]] = {"H1": {}, "H2": {}, "H3": {}}
-    for col in z.columns:
-        details, smooth = modwt(z[col].to_numpy(), wavelet=WAVELET, level=J_LEVELS)
-        mb = mra_bands(details, smooth)
-        for name, arr in mb.items():
-            bands[name][col] = pd.Series(arr, index=z.index)
-    return {k: pd.DataFrame(v)[z.columns] for k, v in bands.items()}
+def decompose_residuals(z: pd.DataFrame, trim: bool = True) -> dict[str, pd.DataFrame]:
+    """H1/H2/H3 band DataFrames aligned with z; rows touched by the boundary are dropped per band."""
+    cols: dict[str, dict[str, pd.Series]] = {}
+    for c in z.columns:
+        details, smooth = modwt_mra(z[c].to_numpy(), wavelet=WAVELET, level=J_LEVELS)
+        for name, arr in mra_bands(details, smooth).items():
+            cols.setdefault(name, {})[c] = pd.Series(arr, index=z.index)
+    out = {}
+    for name, d in cols.items():
+        df = pd.DataFrame(d)[z.columns]
+        if trim:
+            b = band_trim(name, WAVELET)
+            df = df.iloc[b:-b] if len(df) > 2 * b + 50 else df
+        out[name] = df
+    return out

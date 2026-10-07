@@ -9,18 +9,27 @@ REPORT_ASSETS = ROOT / "report" / "assets"
 
 TICKERS = ["XLE", "XLF", "XLK", "XLV", "XLI", "XLU", "SPY"]
 START = "1999-01-01"
-END = None  # through run date
+END = "2026-09-30"  # inclusive; fixed so every run sees the same sample
 
 SEED = 42
-N_SIM = 10_000
-N_SIM_SENS = 50_000
-ALPHAS = (0.05, 0.01)  # 95% and 99% VaR/ES
+N_SIM = 20_000
+ALPHAS = (0.05, 0.025, 0.01)  # 95%, 97.5% (FRTB ES level) and 99%
 
-WINDOW = 750
-REFIT_EVERY = 20
+TRAIN_END = "2019-12-31"
 OOS_START = "2020-01-01"
+WINDOW = 1000  # rolling estimation window (trading days); must exceed the J=6 boundary length
+REFIT_EVERY = 20
+HS_WINDOW = 500
+
 J_LEVELS = 6
 WAVELET = "db2"
+HORIZONS = (1, 5, 20)
 
-# For speed on laptop: full rolling uses REFIT_EVERY; set FAST_MODE via env
-FAST_REFIT_EVERY = 120  # used when QUANT_EDGE_FAST=1
+TAIL_QS = (0.05, 0.10)
+N_BOOT = 500
+BLOCK_LEN = 20
+
+CRISIS_WINDOWS = {
+    "GFC 2007-09": ("2007-07-01", "2009-06-30"),
+    "COVID 2020": ("2020-02-01", "2020-12-31"),
+}

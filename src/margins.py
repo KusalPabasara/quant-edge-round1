@@ -1,4 +1,4 @@
-"""GARCH(1,1)-t margins and PIT uniforms."""
+"""GARCH(1,1)-t margins, daily one-step-ahead volatility filter, and PIT uniforms."""
 
 from __future__ import annotations
 
@@ -12,55 +12,68 @@ from scipy import stats
 
 @dataclass
 class MarginFit:
+    """Parameters in decimal-return units."""
+
     ticker: str
-    std_resid: pd.Series
-    cond_vol: pd.Series
-    last_vol: float
-    nu: float
     mu: float
-    success: bool
+    omega: float
+    alpha: float
+    beta: float
+    nu: float
+    std_resid: pd.Series
+    sigma2_last: float  # conditional variance on the last in-sample day
+    eps_last: float  # demeaned return on the last in-sample day
+
+    def next_var(self) -> float:
+        return self.omega + self.alpha * self.eps_last**2 + self.beta * self.sigma2_last
 
 
 def fit_garch_t(returns: pd.Series, ticker: str = "") -> MarginFit:
-    """Fit GARCH(1,1) with Student-t; returns in decimal, scaled to % for arch."""
-    y = returns.dropna() * 100.0  # arch prefers percent
-    am = arch_model(y, mean="Constant", vol="Garch", p=1, q=1, dist="t", rescale=False)
-    try:
-        res = am.fit(disp="off", show_warning=False)
-        std = pd.Series(res.std_resid, index=y.index).replace([np.inf, -np.inf], np.nan).dropna()
-        vol = pd.Series(res.conditional_volatility, index=y.index) / 100.0
-        nu = float(res.params.get("nu", 8.0))
-        mu = float(res.params.get("mu", 0.0)) / 100.0
-        last_vol = float(vol.iloc[-1])
-        return MarginFit(ticker, std, vol, last_vol, nu, mu, True)
-    except Exception:
-        # fallback: standardize by rolling vol
-        vol = y.rolling(60, min_periods=30).std().bfill() / 100.0
-        std = (y / 100.0) / vol.replace(0, np.nan)
-        std = std.replace([np.inf, -np.inf], np.nan).dropna()
-        return MarginFit(ticker, std, vol.reindex(std.index), float(vol.iloc[-1]), 8.0, 0.0, False)
+    y = returns.dropna() * 100.0
+    res = arch_model(y, mean="Constant", vol="GARCH", p=1, q=1, dist="t", rescale=False).fit(
+        disp="off", show_warning=False
+    )
+    p = res.params
+    vol = np.asarray(res.conditional_volatility) / 100.0
+    mu = float(p["mu"]) / 100.0
+    std = pd.Series(np.asarray(res.std_resid), index=y.index).replace([np.inf, -np.inf], np.nan).dropna()
+    return MarginFit(
+        ticker=ticker,
+        mu=mu,
+        omega=float(p["omega"]) / 1e4,
+        alpha=float(p["alpha[1]"]),
+        beta=float(p["beta[1]"]),
+        nu=float(p["nu"]),
+        std_resid=std,
+        sigma2_last=float(vol[-1] ** 2),
+        eps_last=float(returns.dropna().iloc[-1] - mu),
+    )
 
 
 def fit_all_margins(returns: pd.DataFrame) -> dict[str, MarginFit]:
     return {c: fit_garch_t(returns[c], c) for c in returns.columns}
 
 
+def filter_vol(fit: MarginFit, future: pd.Series) -> pd.Series:
+    """One-step-ahead sigma for each date in `future`, using fixed parameters and only past returns."""
+    s2 = fit.next_var()
+    out = np.empty(len(future))
+    for i, r in enumerate(future.to_numpy()):
+        out[i] = np.sqrt(s2)
+        s2 = fit.omega + fit.alpha * (r - fit.mu) ** 2 + fit.beta * s2
+    return pd.Series(out, index=future.index)
+
+
 def std_resid_matrix(fits: dict[str, MarginFit]) -> pd.DataFrame:
-    cols = {k: v.std_resid for k, v in fits.items()}
-    return pd.DataFrame(cols).dropna(how="any")
+    return pd.DataFrame({k: v.std_resid for k, v in fits.items()}).dropna(how="any")
 
 
-def to_uniforms(z: pd.DataFrame) -> pd.DataFrame:
-    """Empirical PIT ranks clipped away from {0,1}."""
-    n = len(z)
-    u = z.rank(method="average") / (n + 1.0)
-    return u.clip(1e-6, 1.0 - 1e-6)
+def to_uniforms(z: pd.DataFrame | np.ndarray) -> np.ndarray:
+    """Pseudo-observations: ranks / (n + 1)."""
+    z = pd.DataFrame(z)
+    return (z.rank(method="average") / (len(z) + 1.0)).to_numpy()
 
 
-def invert_t_margin(u: np.ndarray, nu: float, mu: float, sigma: float) -> np.ndarray:
-    """Map uniforms to return shocks via Student-t then scale by cond vol."""
-    z = stats.t.ppf(u, df=max(nu, 2.1))
-    # standardize t to unit variance roughly
-    if nu > 2:
-        z = z / np.sqrt(nu / (nu - 2.0))
-    return mu + sigma * z
+def std_t_ppf(u: np.ndarray, nu: float) -> np.ndarray:
+    """Quantile of the unit-variance Student-t used by the GARCH innovations."""
+    return stats.t.ppf(u, df=nu) * np.sqrt((nu - 2.0) / nu)

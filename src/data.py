@@ -2,41 +2,42 @@
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
-import yfinance as yf
 
 from src.config import DATA_DIR, END, START, TICKERS
 
 
-def download_prices(force: bool = False) -> pd.DataFrame:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    stable = DATA_DIR / "etf_prices.csv"
-    if stable.exists() and not force:
-        px = pd.read_csv(stable, index_col=0, parse_dates=True)
-        cols = [c for c in TICKERS if c in px.columns]
-        if len(cols) == len(TICKERS):
-            return px[TICKERS].dropna(how="any")
+def _download() -> pd.DataFrame:
+    import yfinance as yf
 
+    end_exclusive = (pd.Timestamp(END) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
     frames = []
     for t in TICKERS:
-        df = yf.download(t, start=START, end=END, auto_adjust=True, progress=False, threads=False)
-        if isinstance(df.columns, pd.MultiIndex):
-            s = df[("Close", t)] if ("Close", t) in df.columns else df["Close"].iloc[:, 0]
-        else:
-            s = df["Close"]
+        df = yf.download(t, start=START, end=end_exclusive, auto_adjust=True, progress=False, threads=False)
+        s = df["Close"]
+        if isinstance(s, pd.DataFrame):
+            s = s.iloc[:, 0]
         s.name = t
         frames.append(s)
-    px = pd.concat(frames, axis=1).dropna(how="any").sort_index()
-    stamp = pd.Timestamp.utcnow().strftime("%Y%m%d")
-    px.to_csv(DATA_DIR / f"etf_prices_{stamp}.csv")
-    px.to_csv(stable)
-    (DATA_DIR / "download_meta.txt").write_text(
-        f"downloaded_utc={pd.Timestamp.utcnow().isoformat()}\nrows={len(px)}\nstart={px.index.min()}\nend={px.index.max()}\n"
-    )
-    return px
+    return pd.concat(frames, axis=1)
+
+
+def download_prices(force: bool = False) -> pd.DataFrame:
+    """Daily adjusted closes for TICKERS, START..END inclusive, inner-joined."""
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    cache = DATA_DIR / "etf_prices.csv"
+    if cache.exists() and not force:
+        px = pd.read_csv(cache, index_col=0, parse_dates=True)
+    else:
+        px = _download()
+        px.to_csv(cache)
+        (DATA_DIR / "download_meta.txt").write_text(
+            f"downloaded_utc={pd.Timestamp.utcnow().isoformat()}\nsource=Yahoo Finance via yfinance, auto_adjust=True\n"
+        )
+    px = px[TICKERS].dropna(how="any").sort_index()
+    return px.loc[START:END]
 
 
 def log_returns(prices: pd.DataFrame) -> pd.DataFrame:
-    import numpy as np
-
     return np.log(prices / prices.shift(1)).dropna(how="any")

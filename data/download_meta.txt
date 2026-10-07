@@ -2,3 +2,4 @@ downloaded_utc=2026-10-07T07:44:41.758856+00:00
 rows=6982
 start=1999-01-04 00:00:00
 end=2026-10-06 00:00:00
+analysis_window=config START..END (1999-01-01..2026-09-30); later rows in the cache are ignored

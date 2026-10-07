@@ -1,0 +1,15 @@
+{
+  "best_1d_model": "H1-student",
+  "best_1d_fz0": -3.6110230508911627,
+  "raw_gaussian_hit_rate_99": 0.01415929203539823,
+  "best_1d_hit_rate_99": 0.013569321533923304,
+  "lambda_flat_p": 0.308,
+  "lambda_H1": 0.39789395970546515,
+  "lambda_H3": 0.36467136834333896,
+  "h3_calm": 0.3936432105686499,
+  "h3_crisis": 0.9195402298850575,
+  "best_20d_method": "sqrt-time Gaussian",
+  "es20_ratio_best_vs_sqrt_gauss": 1.0,
+  "sqrt_gauss_20d_hit_rate_975": 0.03571428571428571,
+  "best_20d_hit_rate_975": 0.03571428571428571
+}

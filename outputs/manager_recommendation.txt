@@ -1,6 +1,0 @@
-Desk / book: Sector ETF equal-weight prototype (XLE,XLF,XLK,XLV,XLI,XLU,SPY)
-Regulatory LH anchor: 10d ES / internal 1d limit
-Horizon diagnostic: λ_L(H1)=0.676, λ_L(H2)=0.686, λ_L(H3)=0.659; AIC winner H1: clayton
-Stress contrast: OOS 2020–present 95% VaR hit rate wavelet–copula 5.24% vs Gaussian 7.00% (expected 5%); mean 99% ES WC=0.0340 vs Gaussian=0.0266
-Action: Tighten tactical limits and size hedges to the H1 band; elevated coarse-horizon tail dependence also flags strategic diversification for SA high-ρ review.
-Governance note: Wavelet–copula is an internal overlay; FRTB capital remains HS / MAR33 ES until validated.
